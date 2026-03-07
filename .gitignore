@@ -35,3 +35,9 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Runtime data
+analysis_data/
+vector_stores/
+repos/
+cache/

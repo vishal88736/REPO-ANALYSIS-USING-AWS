@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     port: int = 8000
     log_level: str = "INFO"
 
+    # --- API Security ---
+    api_secret_key: str = "585b48a2041c3482d17d6b3d29906314aaf693c20a1dcce9f26c025f65602d34"
+
+
     @property
     def clone_path(self) -> Path:
         return Path(self.clone_base_dir)
