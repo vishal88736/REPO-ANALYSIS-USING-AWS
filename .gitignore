@@ -41,3 +41,5 @@ analysis_data/
 vector_stores/
 repos/
 cache/
+
+nohup.out
