@@ -13,7 +13,6 @@ from typing import TypeVar, Type
 from pydantic import BaseModel
 
 from app.config import settings
-from app.agents.groq_client import GroqClient
 from app.core.exceptions import LLMError
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,7 @@ class LLMRouter:
     """
 
     def __init__(self, groq: GroqClient):
-        self._groq = groq
+        self._groq = None
         self._bedrock = None
         self._bedrock_init_attempted = False
         self._gemini = None
@@ -123,15 +122,11 @@ class LLMRouter:
 
         # PRIMARY: Bedrock
         bedrock = self._get_bedrock()
-        if bedrock:
-            try:
-                logger.debug("Routing %s → Bedrock qwen3-coder-next", task.value)
-                return await bedrock.chat(prompt, system, temp, max_tokens)
-            except Exception as e:
-                logger.warning("Bedrock failed for %s: %s — trying fallbacks", task.value, e)
+        if not bedrock:
+            raise LLMError("Bedrock is not available or failed to intialize.")
 
-        # FALLBACK chain
-        return await self._fallback_chat(task, prompt, system, temp, max_tokens)
+        logger.debug("Routing %s → Bedrock qwen3-coder-next", task.value)
+        return await bedrock.chat(prompt, system, temp, max_tokens)
 
     async def _fallback_chat(
         self, task, prompt, system, temperature, max_tokens, original_error=None,
@@ -179,31 +174,10 @@ class LLMRouter:
 
         # PRIMARY: Bedrock
         bedrock = self._get_bedrock()
-        if bedrock:
-            try:
-                logger.debug("Structured %s → Bedrock", task.value)
-                return await bedrock.structured_chat(prompt, system, response_model, temp, max_tokens)
-            except Exception as e:
-                logger.warning("Structured Bedrock failed for %s: %s", task.value, e)
+        if not bedrock:
+            raise LLMError("Bedrock is not available or failed to initialize.")
 
-        # Fallback: Gemini → Groq
-        gemini = self._get_gemini()
-        if gemini:
-            try:
-                return await gemini.structured_generate(prompt, system, response_model, temp)
-            except Exception:
-                pass
+        logger.debug("Structured %s → Bedrock", task.value)
+        return await bedrock.structured_chat(prompt, system, response_model, temp, max_tokens)
 
-        if settings.groq_available:
-            try:
-                return await self._groq.structured_chat(
-                    prompt=prompt, system=system, response_model=response_model,
-                    temperature=temp, max_tokens=max_tokens,
-                )
-            except Exception:
-                return await self._groq.structured_chat(
-                    prompt=prompt, system=system, response_model=response_model,
-                    temperature=temp, max_tokens=max_tokens, use_fast_model=True,
-                )
-
-        raise LLMError(f"All providers failed for structured {task.value}")
+        

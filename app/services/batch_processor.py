@@ -10,14 +10,16 @@ from app.config import settings
 from app.agents.file_analysis_agent import analyze_file
 from app.parsers.treesitter_parser import parse_file
 from app.schemas.analysis import (
-    FileMetadata, FileAnalysisResult, CompactFileSummary,
-    FunctionAnalysis, ClassAnalysis,
+    FileMetadata,
+    FileAnalysisResult,
+    CompactFileSummary,
+    FunctionAnalysis,
+    ClassAnalysis,
 )
 from app.services.cache import AnalysisCache
 
 logger = logging.getLogger(__name__)
 
-# Files that NEVER need LLM analysis
 SKIP_LLM_EXTENSIONS = {
     ".lock", ".sum", ".mod", ".toml", ".yaml", ".yml",
     ".svg", ".png", ".jpg", ".ico", ".gif",
@@ -34,37 +36,33 @@ SKIP_LLM_FILENAMES = {
     "Makefile", "LICENSE", "CHANGELOG.md",
 }
 
-# Files where tree-sitter is sufficient (config, data, docs)
 TREESITTER_ONLY_EXTENSIONS = {
     ".json", ".xml", ".csv", ".env", ".ini", ".cfg",
 }
 
 
 def _needs_llm(metadata: FileMetadata, content: str, parsed) -> bool:
-    """Decide if this file needs LLM analysis or tree-sitter is enough."""
-    filename = metadata.path.split("/")[-1]
-    ext = f".{metadata.extension}" if metadata.extension else ""
 
-    # Skip entirely: binary, locks, assets
+    filename = metadata.path.split("/")[-1]
+    ext = metadata.extension
+
     if ext in SKIP_LLM_EXTENSIONS:
         return False
+
     if filename in SKIP_LLM_FILENAMES:
         return False
 
-    # Config files: tree-sitter only
     if ext in TREESITTER_ONLY_EXTENSIONS and filename != "package.json":
         return False
 
-    # Very small files (<10 lines): tree-sitter only
     line_count = content.count("\n") + 1
+
     if line_count < 10:
         return False
 
-    # No functions/classes and <30 lines: tree-sitter only
     if not parsed.functions and not parsed.classes and line_count < 30:
         return False
 
-    # README, docs: tree-sitter only
     if filename.upper().startswith("README") or ext == ".md":
         return False
 
@@ -72,19 +70,26 @@ def _needs_llm(metadata: FileMetadata, content: str, parsed) -> bool:
 
 
 def _build_treesitter_result(
-    file_path: str,
-    content: str,
-    metadata: FileMetadata,
+    file_path,
+    content,
+    metadata,
     parsed,
-    all_project_files: list[str],
-) -> FileAnalysisResult:
-    """Build result from tree-sitter only — no LLM needed."""
+    all_project_files,
+):
+
     from app.agents.file_analysis_agent import (
-        _extract_file_references, _detect_interactions,
+        _extract_file_references,
+        _detect_interactions,
     )
 
     refs = _extract_file_references(content, all_project_files)
-    interactions = _detect_interactions(file_path, content, refs, metadata.language)
+
+    interactions = _detect_interactions(
+        file_path,
+        content,
+        refs,
+        metadata.language,
+    )
 
     functions = [
         FunctionAnalysis(
@@ -93,6 +98,7 @@ def _build_treesitter_result(
         )
         for f in parsed.functions
     ]
+
     classes = [
         ClassAnalysis(name=c.name, methods=c.methods)
         for c in parsed.classes
@@ -113,7 +119,8 @@ def _build_treesitter_result(
     )
 
 
-def _build_compact_summary(fa: FileAnalysisResult) -> CompactFileSummary:
+def _build_compact_summary(fa: FileAnalysisResult):
+
     return CompactFileSummary(
         file_path=fa.file_path,
         purpose=fa.summary[:200] if fa.summary else "",
@@ -129,12 +136,13 @@ def _build_compact_summary(fa: FileAnalysisResult) -> CompactFileSummary:
 
 
 async def _process_single_file(
-    llm_client,
+    router,
     repo_path: Path,
     metadata: FileMetadata,
     cache: AnalysisCache,
     all_project_files: list[str],
-) -> tuple[FileAnalysisResult | None, CompactFileSummary | None]:
+):
+
     file_path = repo_path / metadata.path
 
     try:
@@ -144,30 +152,37 @@ async def _process_single_file(
         logger.warning("Skip %s: %s", metadata.path, e)
         return None, None
 
-    # Check cache first
     content_hash = AnalysisCache.hash_content(content_bytes)
+
     cached = cache.get(content_hash)
+
     if cached:
         logger.info("♻ Cache: %s", metadata.path)
         summary = cache.get_summary(content_hash) or _build_compact_summary(cached)
         return cached, summary
 
-    # Parse with tree-sitter
     parsed = parse_file(metadata.path, content_bytes, metadata.extension)
 
-    # Decide: LLM or tree-sitter only?
     if not _needs_llm(metadata, content_text, parsed):
+
         result = _build_treesitter_result(
-            metadata.path, content_text, metadata, parsed, all_project_files,
+            metadata.path,
+            content_text,
+            metadata,
+            parsed,
+            all_project_files,
         )
+
         summary = _build_compact_summary(result)
+
         cache.put(content_hash, result, summary)
+
         logger.info("⚡ TreeSitter: %s (skipped LLM)", metadata.path)
+
         return result, summary
 
-    # Full LLM analysis
     result = await analyze_file(
-        groq=llm_client,
+        router=router,
         file_path=metadata.path,
         content=content_text,
         metadata=metadata,
@@ -176,40 +191,53 @@ async def _process_single_file(
     )
 
     if result:
+
         summary = _build_compact_summary(result)
+
         cache.put(content_hash, result, summary)
+
         return result, summary
 
     return None, None
 
 
 async def process_files_in_batches(
-    groq,
+    router,
     repo_path: Path,
     files: list[FileMetadata],
     batch_size: int | None = None,
     cache: AnalysisCache | None = None,
-) -> tuple[list[FileAnalysisResult], list[CompactFileSummary]]:
+):
+
     batch_size = batch_size or settings.batch_size
+
     if cache is None:
         cache = AnalysisCache()
 
     all_project_files = [f.path for f in files]
 
     total = len(files)
-    results: list[FileAnalysisResult] = []
-    summaries: list[CompactFileSummary] = []
+
+    results = []
+    summaries = []
+
     skipped_llm = 0
     used_llm = 0
     failed = 0
 
-    logger.info("Processing %d files | batch=%d | concurrent=%d",
-                total, batch_size, settings.max_concurrent_llm_calls)
+    logger.info(
+        "Processing %d files | batch=%d | concurrent=%d",
+        total,
+        batch_size,
+        settings.max_concurrent_llm_calls,
+    )
 
-    # Phase 1: Quick pass — tree-sitter-only files (instant, no LLM)
     llm_needed_files = []
+
     for metadata in files:
+
         file_path = repo_path / metadata.path
+
         try:
             content_bytes = file_path.read_bytes()
             content_text = content_bytes.decode("utf-8", errors="replace")
@@ -217,7 +245,9 @@ async def process_files_in_batches(
             continue
 
         content_hash = AnalysisCache.hash_content(content_bytes)
+
         cached = cache.get(content_hash)
+
         if cached:
             results.append(cached)
             summaries.append(cache.get_summary(content_hash) or _build_compact_summary(cached))
@@ -227,62 +257,105 @@ async def process_files_in_batches(
         parsed = parse_file(metadata.path, content_bytes, metadata.extension)
 
         if not _needs_llm(metadata, content_text, parsed):
+
             result = _build_treesitter_result(
-                metadata.path, content_text, metadata, parsed, all_project_files,
+                metadata.path,
+                content_text,
+                metadata,
+                parsed,
+                all_project_files,
             )
+
             summary = _build_compact_summary(result)
+
             cache.put(content_hash, result, summary)
+
             results.append(result)
             summaries.append(summary)
+
             skipped_llm += 1
+
         else:
             llm_needed_files.append(metadata)
 
     logger.info(
-        "Phase 1 done: %d tree-sitter-only | %d need LLM | %d cached",
-        skipped_llm, len(llm_needed_files), skipped_llm,
+        "Phase 1 done: %d tree-sitter-only | %d need LLM",
+        skipped_llm,
+        len(llm_needed_files),
     )
 
-    # Phase 2: LLM files — process in parallel batches
     sem = asyncio.Semaphore(settings.max_concurrent_llm_calls)
 
-    async def _process_with_sem(metadata: FileMetadata):
+    async def _process_with_sem(metadata):
+
         async with sem:
             return await _process_single_file(
-                groq, repo_path, metadata, cache, all_project_files,
+                router,
+                repo_path,
+                metadata,
+                cache,
+                all_project_files,
             )
 
-    batches = [llm_needed_files[i:i + batch_size] for i in range(0, len(llm_needed_files), batch_size)]
+    batches = [
+        llm_needed_files[i:i + batch_size]
+        for i in range(0, len(llm_needed_files), batch_size)
+    ]
 
     for idx, batch in enumerate(batches):
+
         batch_num = idx + 1
+
         logger.info("LLM Batch %d/%d (%d files)", batch_num, len(batches), len(batch))
 
-        # Run batch in parallel
         tasks = [_process_with_sem(m) for m in batch]
+
         batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in batch_results:
+
             if isinstance(result, Exception):
+
                 logger.error("File failed: %s", result)
+
                 failed += 1
+
             elif result is not None:
+
                 analysis, summary = result
+
                 if analysis:
                     results.append(analysis)
                     used_llm += 1
+
                 if summary:
                     summaries.append(summary)
+
             else:
+
                 failed += 1
 
-        logger.info("Batch %d done | total=%d | llm=%d | skip=%d | fail=%d",
-                     batch_num, len(results), used_llm, skipped_llm, failed)
+        logger.info(
+            "Batch %d done | total=%d | llm=%d | skip=%d | fail=%d",
+            batch_num,
+            len(results),
+            used_llm,
+            skipped_llm,
+            failed,
+        )
 
     total_refs = sum(len(r.internal_file_references) for r in results)
+
     total_inter = sum(len(r.file_interactions) for r in results)
+
     logger.info(
-        "✅ Complete | %d files | llm=%d | tree-sitter=%d | failed=%d | refs=%d | interactions=%d",
-        len(results), used_llm, skipped_llm, failed, total_refs, total_inter,
+        "Complete | %d files | llm=%d | tree-sitter=%d | failed=%d | refs=%d | interactions=%d",
+        len(results),
+        used_llm,
+        skipped_llm,
+        failed,
+        total_refs,
+        total_inter,
     )
+
     return results, summaries
